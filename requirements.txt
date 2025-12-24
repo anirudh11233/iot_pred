@@ -7,3 +7,4 @@ matplotlib
 seaborn 
 jupyterlab  
 flask
+streamlit

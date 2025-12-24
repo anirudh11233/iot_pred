@@ -1,8 +1,16 @@
 import numpy as np
 import pandas as pd
+import time
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix,
+)
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
@@ -11,6 +19,9 @@ import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 # =========================
@@ -30,9 +41,11 @@ FEATURE_COLUMNS = [
 ]
 LABEL_COLUMN = "label"
 
+CM_DISPLAY_DELAY = 2  # seconds
+
 
 # =========================
-# HELPERS
+# HELPER FUNCTIONS
 # =========================
 
 def create_sequences(X, y, window_size=10):
@@ -49,9 +62,48 @@ def safe_roc_auc(y_true, y_prob):
     return roc_auc_score(y_true, y_prob)
 
 
-def evaluate_model(name, model, X_train, y_train, X_test, y_test, is_sequence=False, class_weight=None):
+def plot_and_save_confusion_matrix(y_true, y_pred, model_name):
+    cm = confusion_matrix(y_true, y_pred)
+
+    plt.figure(figsize=(4, 3))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=["Normal (0)", "Failure (1)"],
+        yticklabels=["Normal (0)", "Failure (1)"],
+    )
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title(f"Confusion Matrix - {model_name}")
+    plt.tight_layout()
+
+    # Save
+    filename = f"confusion_matrix_{model_name.replace(' ', '_')}.png"
+    plt.savefig(filename)
+
+    # Auto display (non-blocking)
+    plt.show(block=False)
+    plt.pause(CM_DISPLAY_DELAY)
+    plt.close()
+
+
+def evaluate_model(
+    name,
+    model,
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    is_sequence=False,
+    class_weight=None,
+):
     if is_sequence:
-        early_stop = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
+        early_stop = EarlyStopping(
+            monitor="val_loss", patience=3, restore_best_weights=True
+        )
+
         model.fit(
             X_train,
             y_train,
@@ -62,12 +114,17 @@ def evaluate_model(name, model, X_train, y_train, X_test, y_test, is_sequence=Fa
             class_weight=class_weight,
             verbose=0,
         )
+
         y_prob = model.predict(X_test).ravel()
         y_pred = (y_prob > 0.5).astype(int)
+
     else:
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
         y_prob = model.predict_proba(X_test)[:, 1]
+
+    # Confusion Matrix (auto + save)
+    plot_and_save_confusion_matrix(y_test, y_pred, name)
 
     return {
         "Model": name,
@@ -84,25 +141,18 @@ def evaluate_model(name, model, X_train, y_train, X_test, y_test, is_sequence=Fa
 # =========================
 
 def main():
-    df = pd.read_csv(DATA_PATH)
-
-    # Optional safety
-    df = df.dropna()
+    df = pd.read_csv(DATA_PATH).dropna()
 
     X = df[FEATURE_COLUMNS].values
     y = df[LABEL_COLUMN].values
 
-    # 🔥 TIME-BASED SPLIT (PdM correct)
+    # Time-based split
     split_idx = int(0.7 * len(df))
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
-    # Class imbalance ratio
     neg, pos = np.bincount(y_train)
     scale_pos_weight = neg / pos
-
-    print("Class distribution (train):", np.bincount(y_train))
-    print("Scale pos weight:", scale_pos_weight)
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -110,38 +160,36 @@ def main():
 
     results = []
 
-    # -------------------------
     # Logistic Regression
-    # -------------------------
     results.append(
         evaluate_model(
             "Logistic Regression",
             LogisticRegression(max_iter=1000, class_weight="balanced"),
-            X_train_scaled, y_train,
-            X_test_scaled, y_test,
+            X_train_scaled,
+            y_train,
+            X_test_scaled,
+            y_test,
         )
     )
 
-    # -------------------------
     # Random Forest
-    # -------------------------
     results.append(
         evaluate_model(
             "Random Forest",
             RandomForestClassifier(
                 n_estimators=200,
-                random_state=42,
                 class_weight="balanced",
-                n_jobs=-1
+                random_state=42,
+                n_jobs=-1,
             ),
-            X_train, y_train,
-            X_test, y_test,
+            X_train,
+            y_train,
+            X_test,
+            y_test,
         )
     )
 
-    # -------------------------
     # XGBoost
-    # -------------------------
     results.append(
         evaluate_model(
             "XGBoost",
@@ -153,28 +201,26 @@ def main():
                 scale_pos_weight=scale_pos_weight,
                 random_state=42,
             ),
-            X_train, y_train,
-            X_test, y_test,
+            X_train,
+            y_train,
+            X_test,
+            y_test,
         )
     )
 
-    # -------------------------
-    # SEQUENCE MODELS
-    # -------------------------
+    # Sequence models
     WINDOW = 10
     X_seq_train, y_seq_train = create_sequences(X_train_scaled, y_train, WINDOW)
     X_seq_test, y_seq_test = create_sequences(X_test_scaled, y_test, WINDOW)
 
     seq_class_weight = {
         0: 1.0,
-        1: (y_seq_train == 0).sum() / (y_seq_train == 1).sum()
+        1: (y_seq_train == 0).sum() / (y_seq_train == 1).sum(),
     }
 
     input_shape = (X_seq_train.shape[1], X_seq_train.shape[2])
 
-    # -------------------------
     # LSTM
-    # -------------------------
     lstm = Sequential([
         LSTM(64, input_shape=input_shape),
         Dropout(0.3),
@@ -186,16 +232,16 @@ def main():
         evaluate_model(
             "LSTM",
             lstm,
-            X_seq_train, y_seq_train,
-            X_seq_test, y_seq_test,
+            X_seq_train,
+            y_seq_train,
+            X_seq_test,
+            y_seq_test,
             is_sequence=True,
-            class_weight=seq_class_weight
+            class_weight=seq_class_weight,
         )
     )
 
-    # -------------------------
     # GRU
-    # -------------------------
     gru = Sequential([
         GRU(64, input_shape=input_shape),
         Dropout(0.3),
@@ -207,18 +253,17 @@ def main():
         evaluate_model(
             "GRU",
             gru,
-            X_seq_train, y_seq_train,
-            X_seq_test, y_seq_test,
+            X_seq_train,
+            y_seq_train,
+            X_seq_test,
+            y_seq_test,
             is_sequence=True,
-            class_weight=seq_class_weight
+            class_weight=seq_class_weight,
         )
     )
 
-    # -------------------------
-    # RESULTS
-    # -------------------------
     results_df = pd.DataFrame(results)
-    print("\n===== MODEL COMPARISON (IMBALANCE FIXED) =====")
+    print("\n===== MODEL COMPARISON =====")
     print(results_df)
 
     results_df.to_csv("model_results_summary.csv", index=False)
